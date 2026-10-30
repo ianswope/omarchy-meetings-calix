@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Replace an Omarchy clock with the Calix agenda; restore its previous entry."""
+import argparse
+import copy
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+PLUGIN_ID = "ianswope.meetings"
+SECTIONS = ("left", "centerBegin", "center", "centerEnd", "right", "tray")
+FORMATS = ("format", "formatAlt", "verticalFormat", "verticalFormatAlt")
+
+
+def read_json(path):
+    with path.open() as handle:
+        return json.load(handle)
+
+
+def write_json(path, data):
+    # shell.json is often managed through a dotfiles symlink. Keep that link.
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            os.fchmod(handle.fileno(), mode)
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def entries(layout):
+    for section in SECTIONS:
+        for index, entry in enumerate(layout.get(section, [])):
+            yield section, index, entry
+
+
+def entry_id(entry):
+    return entry if isinstance(entry, str) else entry.get("id")
+
+
+def layout_with_defaults(config, defaults):
+    layout = config.setdefault("bar", {}).setdefault("layout", {})
+    for section in SECTIONS:
+        if section not in layout:
+            layout[section] = copy.deepcopy(defaults.get("bar", {}).get("layout", {}).get(section, []))
+    return layout
+
+
+def enable(config, defaults, clock_ids):
+    result = copy.deepcopy(config)
+    layout = layout_with_defaults(result, defaults)
+    clocks = [(s, i, e) for s, i, e in entries(layout) if entry_id(e) in clock_ids]
+    if len(clocks) != 1:
+        raise ValueError("Expected one clock. Use --clock ID to select yours, or add omarchy.clock to the bar first.")
+    if any(entry_id(e) == PLUGIN_ID and isinstance(e, dict) and e.get("displayMode") == "clock"
+           for _, _, e in entries(layout)):
+        raise ValueError("Clock mode is already configured without a restore record; no settings were changed.")
+    section, index, clock = clocks[0]
+    previous = [{"section": s, "index": i, "entry": copy.deepcopy(e)}
+                for s, i, e in entries(layout) if entry_id(e) == PLUGIN_ID]
+    snapshot = {"version": 1, "clock": {"section": section, "index": index, "entry": clock},
+                "meetings": previous, "disabled": PLUGIN_ID in result.get("disabledPlugins", [])}
+    replacement = {"id": PLUGIN_ID, "displayMode": "clock"}
+    if previous and isinstance(previous[0]["entry"], dict):
+        replacement.update(previous[0]["entry"])
+        replacement["displayMode"] = "clock"
+    if isinstance(clock, dict):
+        replacement.update({key: clock[key] for key in FORMATS if key in clock})
+    for name in SECTIONS:
+        layout[name] = [replacement if name == section and i == index else e
+                        for i, e in enumerate(layout[name]) if entry_id(e) != PLUGIN_ID]
+    result["disabledPlugins"] = [p for p in result.get("disabledPlugins", []) if p != PLUGIN_ID]
+    return result, snapshot
+
+
+def restore(config, snapshot):
+    if snapshot.get("version") != 1:
+        raise ValueError("Unrecognized clock restore record.")
+    result = copy.deepcopy(config)
+    layout = result.setdefault("bar", {}).setdefault("layout", {})
+    for section in SECTIONS:
+        layout[section] = [e for e in layout.get(section, []) if entry_id(e) != PLUGIN_ID]
+    records = [snapshot["clock"], *snapshot["meetings"]]
+    # Do not duplicate a clock the user already restored manually.
+    existing = {entry_id(e) for _, _, e in entries(layout)}
+    for record in sorted(records, key=lambda row: (row["section"], row["index"])):
+        if entry_id(record["entry"]) in existing:
+            continue
+        layout[record["section"]].insert(record["index"], record["entry"])
+    disabled = [p for p in result.get("disabledPlugins", []) if p != PLUGIN_ID]
+    if snapshot["disabled"]:
+        disabled.append(PLUGIN_ID)
+    result["disabledPlugins"] = disabled
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("enable", "restore"))
+    parser.add_argument("--clock", help="ID of the clock to replace (normally detected automatically)")
+    args = parser.parse_args()
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    state_home = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+    shell_path = config_home / "omarchy/shell.json"
+    state_path = state_home / "omarchy-meetings/clock-layout.json"
+    config = read_json(shell_path) if shell_path.exists() else {}
+    if args.action == "restore":
+        if not state_path.exists():
+            print("No saved clock layout to restore; nothing changed.")
+            return
+        write_json(shell_path, restore(config, read_json(state_path)))
+        state_path.unlink()
+        print("Previous clock restored. Other bar settings were kept.")
+        return
+    if state_path.exists():
+        if any(entry_id(e) == PLUGIN_ID and isinstance(e, dict) and e.get("displayMode") == "clock"
+               for _, _, e in entries(config.get("bar", {}).get("layout", {}))):
+            print("Clock mode is already enabled; previous clock settings are still saved.")
+            return
+        raise ValueError("A previous clock restore record exists. Run meetings-clock restore before enabling again.")
+    manifest_path = config_home / f"omarchy/plugins/{PLUGIN_ID}/manifest.json"
+    if not manifest_path.exists() or read_json(manifest_path).get("id") != PLUGIN_ID:
+        raise ValueError("Install the plugin with omarchy plugin add before enabling clock mode.")
+    default_path = Path(os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy") / "config/omarchy/shell.json"
+    defaults = read_json(default_path) if default_path.exists() else {}
+    clock_ids = {args.clock} if args.clock else {"omarchy.clock"}
+    if not args.clock:
+        for path in (config_home / "omarchy/plugins").glob("*/manifest.json"):
+            try:
+                manifest = read_json(path)
+                if manifest.get("omarchy", {}).get("clonedFrom") == "omarchy.clock":
+                    clock_ids.add(manifest["id"])
+            except (OSError, ValueError, KeyError):
+                continue
+    result, snapshot = enable(config, defaults, clock_ids)
+    # Save recovery information before touching the live layout.
+    write_json(state_path, snapshot)
+    write_json(shell_path, result)
+    print("Clock mode enabled. Click the date/time for your week. Run meetings-clock restore to undo.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f"meetings-clock: {error}", file=sys.stderr)
+        sys.exit(1)

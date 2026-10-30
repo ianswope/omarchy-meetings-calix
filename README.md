@@ -1,4 +1,12 @@
-# Meetings
+# Calix Clock & Meetings
+
+Click the date and time in your Omarchy bar to see your week, with appointments
+from Calix in a dropdown beneath the clock. Browse weeks, open appointment
+details, and join calls without opening another window.
+
+Clock mode is part of this plugin. It replaces the existing clock entry and
+keeps its date/time format; no personal clock clone or QML edits are needed.
+The original meetings label is also available if you prefer a separate button.
 
 Your day as a column, with a line where you are in it.
 
@@ -12,15 +20,91 @@ And when the thing you are looking at is about to start, there is a button for i
 
 The bar stays quiet: one line with whatever is running or coming up, and how much time is left on it. No badge, nothing that moves.
 
+This is a fork of [jankeesvw/omarchy-meetings](https://github.com/jankeesvw/omarchy-meetings). The widget is his. With no provider set, this copy reads [Calix](https://github.com/ianswope/calix). Google, Outlook and iCalendar stay available by naming a provider.
+
 ## Install
 
+Requires Omarchy's Quickshell bar, Python 3, and
+[Calix 0.9.0 or newer](https://github.com/ianswope/calix#install-recommended).
+Open Calix and connect your calendars first. Confirm that `calix --agenda`
+prints JSON; the plugin reads that local agenda without its own calendar login.
+Tested on Omarchy 4.5.0rc2-1. This plugin uses the Quickshell plugin API and does
+not work with the older Waybar bar.
+
 ```bash
-omarchy plugin add https://github.com/jankeesvw/omarchy-meetings
-omarchy plugin enable jankeesvw.meetings
-omarchy bar move jankeesvw.meetings --section right
+omarchy plugin add https://github.com/ianswope/omarchy-meetings-calix
+~/.config/omarchy/plugins/ianswope.meetings/bin/meetings-clock enable
 ```
 
-Google Calendar is the default provider. Its only requirement is [gcalcli](https://github.com/insanum/gcalcli), which is in the AUR. Because gcalcli is itself a Python program, the interpreter this plugin needs comes along with it.
+Click the date/time to open this week's appointments. The layout reloads
+automatically. If plugin code stays cached after installation or an update,
+run `omarchy restart shell` once.
+
+The installer detects the stock clock or a clone of it, preserves its position
+and date/time formats, and removes any separate meetings button. If you have
+multiple clocks, select one with `meetings-clock enable --clock YOUR.CLOCK.ID`.
+Other bar entries and settings are kept. Running it again is harmless.
+
+To restore your previous clock and meetings button arrangement:
+
+```bash
+~/.config/omarchy/plugins/ianswope.meetings/bin/meetings-clock restore
+```
+
+The restore command preserves unrelated bar changes made since installation.
+Use it **before removing the plugin**. It also works when `shell.json` is a
+symlink to your dotfiles.
+
+### Clock controls
+
+- Left-click: open or close the week dropdown. Each opening starts this week.
+- Right-click: switch between the normal and alternate date formats.
+- Middle-click: open Omarchy's timezone picker.
+- Inside the dropdown: browse weeks, switch to a day, select calendars, or open
+  an appointment. Escape closes an appointment's details, then the dropdown.
+
+Clock mode uses `"displayMode": "clock"` in the plugin's bar entry. The
+`format`, `formatAlt`, `verticalFormat`, and `verticalFormatAlt` settings accept
+Qt date/time formats; `ww` displays the ISO week number. For example:
+
+```bash
+omarchy bar set ianswope.meetings format 'dddd h:mm AP'
+```
+
+### Separate meetings button
+
+After installing, or after restoring the clock, enable the original label with:
+
+```bash
+omarchy plugin enable ianswope.meetings
+omarchy bar move ianswope.meetings --section right
+```
+
+### Updates
+
+```bash
+omarchy plugin update ianswope.meetings
+```
+
+Updating keeps your calendar connections and clock layout settings.
+
+## Calix
+
+Calix is the provider when the config does not name one. It is a native GTK calendar that syncs Google, iCloud, Fastmail and CalDAV servers. Connect those accounts in Calix; the widget reads its locally stored agenda. Keep Calix running when you want it to sync new calendar changes. The widget refreshes the visible agenda every minute and preloads the week every 30 minutes.
+
+```bash
+calix                  # connect an account in the app, once
+calix --calendars      # should print your calendars
+calix --agenda         # and this prints today
+```
+
+`calix --agenda` has to print JSON. A build older than that flag treats the dates as a day to open and shows a window, which on a widget that refreshes every minute is a window a minute.
+
+Clicking the date, or a day's name, opens that day in Calix. Attendees come with the appointment, from what Calix already stored.
+
+Set `"provider"` to `google`, `microsoft` or `ical` to use one of the sources below instead.
+
+Google Calendar's only requirement is [gcalcli](https://github.com/insanum/gcalcli), which is in the AUR. Because gcalcli is itself a Python program, the interpreter this plugin needs comes along with it.
 
 ```bash
 yay -S gcalcli
@@ -180,7 +264,7 @@ The plugin can make up a week, which is useful before you set a provider up and 
 Or from the command line, leaving your config alone:
 
 ```bash
-~/.config/omarchy/plugins/jankeesvw.meetings/bin/meetings-widget week --demo | jq
+~/.config/omarchy/plugins/ianswope.meetings/bin/meetings-widget week --demo | jq
 ```
 
 ## The command line
@@ -188,7 +272,7 @@ Or from the command line, leaving your config alone:
 The script behind the widget is worth something on its own:
 
 ```bash
-cd ~/.config/omarchy/plugins/jankeesvw.meetings/bin
+cd ~/.config/omarchy/plugins/ianswope.meetings/bin
 
 ./meetings-widget day             # today as JSON
 ./meetings-widget day 1           # tomorrow, -1 is yesterday
@@ -199,14 +283,15 @@ cd ~/.config/omarchy/plugins/jankeesvw.meetings/bin
 
 Every appointment carries its start and end, its duration in minutes, the calendar it came from, its colour, its location, its description and its links. Which makes `./meetings-widget week | jq '[.days[].events[]] | length'` a fair answer to how bad next week is.
 
-The command reads the provider from `config.json`; `MEETINGS_PROVIDER=microsoft`
+The command reads the provider from `config.json`. With none set, it reads Calix. `MEETINGS_PROVIDER=google`, `MEETINGS_PROVIDER=microsoft`
 or `MEETINGS_PROVIDER=ical MEETINGS_ICAL_PATH=/path/to/calendar.ics` overrides
 it for one invocation.
 
 ## Removing it
 
 ```bash
-omarchy plugin remove jankeesvw.meetings
+~/.config/omarchy/plugins/ianswope.meetings/bin/meetings-clock restore
+omarchy plugin remove ianswope.meetings
 ```
 
 That leaves three files behind, all of which you can delete by hand:
@@ -215,7 +300,25 @@ That leaves three files behind, all of which you can delete by hand:
 - `~/.config/omarchy-meetings/state.json`, which calendars you ticked and whether you left it on the week or the day. Calendar names again.
 - `~/.cache/omarchy-meetings/calendars.json`, the provider plus calendar names and ids, kept for an hour so the widget does not ask the provider every minute.
 
-No appointments are ever written to disk. Titles, attendees and descriptions are read fresh each time the panel refreshes and are gone when the shell stops, so what survives a removal is those three files and nothing about your actual days. gcalcli keeps its credentials in `~/.local/share/gcalcli`; CLI for Microsoft 365 keeps its own connection data separately. Neither belongs to this plugin, so removing the plugin does not sign either provider out.
+Clock mode additionally saves the prior clock and meetings entries in
+`${XDG_STATE_HOME:-~/.local/state}/omarchy-meetings/clock-layout.json` until you
+run `restore`. That file contains bar settings, not appointments.
+
+The plugin does not save appointment titles, attendees or descriptions. Calix
+maintains its own local calendar database and credentials; removing this plugin
+does not remove those or disconnect your calendars. gcalcli and the Microsoft
+365 CLI likewise keep their credentials separately.
+
+## Development
+
+```bash
+python3 -m unittest discover -s tests -v
+omarchy plugin validate .
+```
+
+Tests cover calendar providers, recurrence, hidden appointments, and clock
+installation/restoration, including dotfile symlinks and subsequent bar edits.
+Use demo data for screenshots; never publish a user's actual appointments.
 
 ## Licence
 

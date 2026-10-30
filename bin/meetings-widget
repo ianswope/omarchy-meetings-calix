@@ -8,9 +8,10 @@
     meetings-widget week -1         # last week
     meetings-widget week --demo     # a made-up week, no gcalcli needed
 
-Reads Google Calendar through gcalcli, Outlook Calendar through the CLI for
-Microsoft 365, or an iCalendar file/feed. Every provider is normalized to the
-same rows before layout.
+Reads Calix by default: a local calendar that has already synced Google,
+iCloud, Fastmail and CalDAV. Google Calendar through gcalcli, Outlook through
+the CLI for Microsoft 365, and an iCalendar file or feed are the other
+providers. Every provider is normalized to the same rows before layout.
 
 Python rather than a shell script because the work here is dates, overlap and
 JSON, and rather than Ruby because gcalcli is itself a Python program: anyone
@@ -65,11 +66,17 @@ def provider_name(value):
         return "microsoft"
     if name in ("ical", "icalendar", "ics"):
         return "ical"
-    return "google"
+    if name in ("google", "gcal", "gcalcli"):
+        return "google"
+    if name == "calix":
+        return "calix"
+    # This fork reads Calix unless a config or the environment names another
+    # provider. Upstream's own default is Google; that stays available.
+    return "calix"
 
 
-# Google stays the default, so existing installs need no config change. The
-# environment override is useful for trying the other adapter from a terminal.
+# No provider in the config means Calix. MEETINGS_PROVIDER overrides that for
+# one run, which is how the other adapters are tried from a terminal.
 PROVIDER = provider_name(os.environ.get("MEETINGS_PROVIDER") or CONFIG.get("provider"))
 
 _ical_source = os.environ.get("MEETINGS_ICAL_PATH") or CONFIG.get("icalPath") or ""
@@ -225,7 +232,47 @@ def required_command():
     return None
 
 
+# The bar's process does not get ~/.local/bin on its PATH, and that is where
+# Calix installs itself, so the absolute path is tried first and `which` is the
+# fallback for a system that put it somewhere else. The env var overrides both,
+# which is how you point this at a build you have not installed yet.
+CALIX_HOME = os.path.join(os.path.expanduser("~"), ".local", "bin", "calix")
+
+
+def calix_binary():
+    override = os.environ.get("MEETINGS_CALIX")
+    if override:
+        return override if os.access(override, os.X_OK) else None
+    if os.access(CALIX_HOME, os.X_OK):
+        return CALIX_HOME
+    return shutil.which("calix")
+
+
+def calix_json(args):
+    """Whatever `calix` printed, parsed. None when it is missing, exits
+    non-zero, or answers with something that is not JSON. An object is still
+    returned: that is how Calix reports `{"error": ...}`, and the caller
+    decides that a list of rows is the only success."""
+    binary = calix_binary()
+    if not binary:
+        return None
+    out = run_capped([binary, *args])
+    if out is None:
+        return None
+    try:
+        return json.loads(out)
+    except (TypeError, ValueError):
+        return None
+
+
 def provider_payload():
+    if PROVIDER == "calix":
+        return {
+            "provider": "calix",
+            "provider_label": "Calix",
+            "agenda_url": "",
+            "calix_bin": calix_binary() or "",
+        }
     if PROVIDER == "microsoft":
         return {
             "provider": "microsoft",
@@ -243,6 +290,31 @@ def provider_payload():
         "provider_label": "Google Calendar",
         "agenda_url": "",
     }
+
+
+def failure_error():
+    """Why the agenda did not come back. Asked only after a fetch has already
+    failed, so the extra look that separates 'not installed' from 'nothing
+    connected' is paid on the unhappy path alone."""
+    if PROVIDER == "ical":
+        if not ICAL_PATH:
+            return "ical-path-missing"
+        if ICAL_PATH.startswith("http://"):
+            return "ical-insecure"
+        return "ical-unavailable"
+    if PROVIDER == "calix":
+        if not calix_binary():
+            return "calix-missing"
+        names = calix_json(["--calendars"])
+        if isinstance(names, list) and names:
+            return "calix-failed"
+        return "not-connected"
+    command_name = required_command()
+    if shutil.which(command_name) is None:
+        return "%s-missing" % command_name
+    if not authenticated():
+        return "not-authenticated"
+    return "%s-failed" % command_name
 
 
 def private_dir(path):
@@ -1065,9 +1137,22 @@ def parse_microsoft_rows(from_day, to_day):
     return rows
 
 
+def parse_calix_rows(from_day, to_day):
+    """Both ends are included, which is how `calix --agenda` reads a range, so
+    there is no end-is-exclusive correction to make here. An explicit range is
+    what lets you page backwards: without one, yesterday would not exist."""
+    rows = calix_json(["--agenda",
+                       from_day.strftime("%Y-%m-%d"),
+                       to_day.strftime("%Y-%m-%d")])
+    # A JSON object here is Calix's {"error": ...}, not a list of rows.
+    return rows if isinstance(rows, list) else None
+
+
 def parse_rows(from_day, to_day):
     if DEMO:
         return demo_rows(from_day, to_day)
+    if PROVIDER == "calix":
+        return parse_calix_rows(from_day, to_day)
     if PROVIDER == "microsoft":
         if shutil.which("m365") is None:
             return None
@@ -1243,7 +1328,7 @@ def assign_columns(events):
 def calendar_url(day, mode):
     if PROVIDER == "microsoft":
         return "https://outlook.office.com/calendar/view/%s" % mode
-    if PROVIDER == "ical":
+    if PROVIDER in ("ical", "calix"):
         return ""
     path = "%d/%d/%d" % (day.year, day.month, day.day)
     return "https://calendar.google.com/calendar/u/0/r/%s/%s" % (mode, path)
@@ -1271,6 +1356,7 @@ def build_day(rows, day):
         # Without leading zeroes, because that is how Google Calendar wants it
         # in its url.
         "date_path": "%d/%d/%d" % (day.year, day.month, day.day),
+        "date_iso": day.isoformat(),
         "calendar_url": calendar_url(day, "day"),
         "date_label": day.strftime("%A %-d %B"),
         "short_label": day.strftime("%a %-d"),
@@ -1345,9 +1431,23 @@ def fetch_microsoft_calendars():
     return records
 
 
+def fetch_calix_calendars():
+    """The calendars Calix is showing, in its own order.
+
+    Only the visible ones come back: Calix already leaves out events from a
+    calendar switched off in its sidebar, so a tick-box for one here could
+    never produce an appointment."""
+    names = calix_json(["--calendars"])
+    if not isinstance(names, list):
+        return None
+    return [{"id": str(name), "name": str(name)} for name in names if str(name)]
+
+
 def fetch_calendar_records():
     if DEMO:
         return [{"id": name, "name": name} for name in DEMO_CALENDAR_NAMES]
+    if PROVIDER == "calix":
+        return fetch_calix_calendars()
     if PROVIDER == "microsoft":
         return fetch_microsoft_calendars()
     if PROVIDER == "ical":
@@ -1408,6 +1508,30 @@ MICROSOFT_STATUSES = {
 }
 
 
+def day_of_event_id(event_id):
+    """The day an id belongs to. Calix builds an id as `<row>-<start epoch>`,
+    which is what makes the occurrences of a repeating appointment distinct,
+    and the epoch is enough to go back for the right day."""
+    stamp = str(event_id or "").rsplit("-", 1)[-1]
+    try:
+        return datetime.fromtimestamp(int(stamp)).date()
+    except (ValueError, OSError, OverflowError):
+        return None
+
+
+def calix_attendees(event_id):
+    """Calix sends the attendees along with every appointment, so this is a
+    lookup rather than a second trip to a provider. The id ends in the
+    occurrence's start time, which is the day to ask for."""
+    day = day_of_event_id(event_id)
+    if day is None:
+        return []
+    for row in parse_calix_rows(day, day) or []:
+        if str(row.get("id") or "") == event_id:
+            return parse_attendees(row.get("attendees"))
+    return []
+
+
 def microsoft_attendees(calendar_name, event_id):
     records = cached_calendar_records() or []
     record = next((entry for entry in records if entry["name"] == calendar_name), None)
@@ -1464,6 +1588,12 @@ def main():
                     dump(parse_attendees(details.get("attendees")))
                     return 0
             dump([])
+            return 0
+
+        if PROVIDER == "calix":
+            # The calendar name stays in the argument list the panel already
+            # sends. The event id alone identifies the appointment.
+            dump(calix_attendees(event_id) if event_id else [])
             return 0
 
         if not event_id or not calendar_name:
@@ -1562,19 +1692,11 @@ def main():
     if rows is None:
         # Two different problems that need two different answers: one is fixed
         # by installing something, the other by logging in.
-        command_name = required_command()
-        missing = (not ICAL_PATH if PROVIDER == "ical"
-                   else shutil.which(command_name) is None)
         payload = provider_payload()
         payload.update({
             "ok": False,
             "compact": COMPACT,
-            "error": ("ical-path-missing" if PROVIDER == "ical" and missing else
-                      ("ical-insecure" if PROVIDER == "ical" and ICAL_PATH.startswith("http://") else
-                      ("ical-unavailable" if PROVIDER == "ical" else
-                      ("%s-missing" % command_name if missing else
-                      ("not-authenticated" if not authenticated() else
-                       "%s-failed" % command_name))))),
+            "error": failure_error(),
             "events": [], "allday": [], "days": [],
         })
         dump(payload)
@@ -1619,12 +1741,13 @@ def main():
     if mode == "week":
         # Google's week view uses the Monday as its anchor.
         payload["date_path"] = built[0]["date_path"]
+        payload["date_iso"] = built[0]["date_iso"]
         payload["date_label"] = "%s - %s" % (days[0].strftime("%-d %b"),
                                              days[-1].strftime("%-d %b"))
         payload["is_today"] = offset == 0
         payload["agenda_url"] = calendar_url(days[0], "week")
     else:
-        for key in ("date_path", "date_label", "is_today", "events", "allday"):
+        for key in ("date_path", "date_iso", "date_label", "is_today", "events", "allday"):
             payload[key] = built[0][key]
         payload["agenda_url"] = calendar_url(days[0], "day")
 

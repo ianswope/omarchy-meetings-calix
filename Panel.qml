@@ -20,8 +20,14 @@ import qs.Ui
 Panel {
   id: root
 
-  moduleName: "jankeesvw.meetings"
-  ipcTarget: "jankeesvw.meetings"
+  moduleName: "ianswope.meetings"
+  ipcTarget: "ianswope.meetings"
+  readonly property bool clockMode: setting("displayMode", "meetings") === "clock"
+
+  // A clock can host this agenda without a separate meetings button.
+  property var anchorItem: null
+  property var hostWidget: null
+  manageIpc: hostWidget === null
 
   // The script that does the talking sits next to this file, so the plugin
   // runs from wherever it was installed without putting anything on $PATH.
@@ -193,9 +199,11 @@ Panel {
   property bool writingView: false
   readonly property bool hasBorrowed: borrowedCalendar !== ""
   property string datePath: ""
+  property string dateIso: ""
   property string dateLabel: ""
-  property string calendarProvider: "google"
-  property string calendarProviderLabel: "Google Calendar"
+  property string calendarProvider: "calix"
+  property string calendarProviderLabel: "Calix"
+  property string calixBin: ""
   property string agendaUrl: ""
 
   // The colour the old waybar module gave a meeting that is about to start. The
@@ -297,8 +305,10 @@ Panel {
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
   }
-  implicitWidth: bar && bar.vertical ? (bar ? bar.barSize : Style.bar.sizeHorizontal) : barSlot
-  implicitHeight: bar && bar.vertical ? barSlot : (bar ? bar.barSize : Style.bar.sizeHorizontal)
+  implicitWidth: clockMode ? clockButton.implicitWidth
+    : (bar && bar.vertical ? bar.barSize : barSlot)
+  implicitHeight: clockMode ? clockButton.implicitHeight
+    : (bar && bar.vertical ? barSlot : (bar ? bar.barSize : Style.bar.sizeHorizontal))
 
   // The title is cut at 20 characters, as it always was: any longer pushes the
   // rest of the bar aside for something you read in the panel anyway.
@@ -352,6 +362,7 @@ Panel {
         // Without leading zeroes, same as the script, because that is how
         // Google Calendar wants it in its url.
         date_path: d.getFullYear() + "/" + (d.getMonth() + 1) + "/" + d.getDate(),
+        date_iso: Qt.formatDate(d, "yyyy-MM-dd"),
         calendar_url: calendarViewUrl(
           d.getFullYear() + "/" + (d.getMonth() + 1) + "/" + d.getDate(), "day"),
         date_label: d.toLocaleDateString(locale, "dddd d MMMM"),
@@ -367,6 +378,7 @@ Panel {
 
     days = out
     datePath = out[0].date_path
+    dateIso = out[0].date_iso
     dateLabel = weekView ? out[0].range_label + " - " + out[6].range_label
                          : out[0].date_label
     agendaUrl = calendarViewUrl(datePath, weekView ? "week" : "day")
@@ -474,9 +486,11 @@ Panel {
 
       nowMinutes = data.now_minutes || 0
       datePath = data.date_path || ""
+      dateIso = data.date_iso || ""
       dateLabel = data.date_label || ""
-      calendarProvider = data.provider || "google"
-      calendarProviderLabel = data.provider_label || "Google Calendar"
+      calendarProvider = data.provider || "calix"
+      calendarProviderLabel = data.provider_label || "Calix"
+      calixBin = data.calix_bin || ""
       agendaUrl = data.agenda_url || ""
       // Whose calendar can be borrowed lives in the config file, which only the
       // script reads, so it arrives with the agenda rather than separately.
@@ -529,14 +543,36 @@ Panel {
       "https://calendar.google.com/calendar/u/0/r/" + view + "/" + safePath
   }
 
+  function safeDateIso(value) {
+    var iso = String(value || "")
+    return /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(iso) ? iso : ""
+  }
+
+  // Calix opens on a date given on its command line, and forwards it to the
+  // instance already running rather than starting a second window.
+  function openCalix(iso) {
+    var day = safeDateIso(iso)
+    if (day === "" || calixBin === "") return
+    close()
+    Util.execArgv(["uwsm-app", "--", calixBin, day])
+  }
+
   function openAgenda() {
+    if (calendarProvider === "calix") {
+      openCalix(dateIso)
+      return
+    }
     openUrl(agendaUrl)
   }
 
   // Opening a single day in the configured calendar. The week is already in front of
   // you, so pointing at a day name means you want that day itself.
   function openDay(day) {
-    if (!bar || !day) return
+    if (!day) return
+    if (calendarProvider === "calix") {
+      openCalix(day.date_iso)
+      return
+    }
     openUrl(day.calendar_url)
   }
 
@@ -625,6 +661,8 @@ Panel {
     if (blockedReason === "ical-insecure") return "iCalendar feed is not on https"
     if (blockedReason === "m365-missing") return "CLI for Microsoft 365 is not installed"
     if (blockedReason === "gcalcli-missing") return "gcalcli is not installed"
+    if (blockedReason === "calix-missing") return "Calix is not installed"
+    if (blockedReason === "not-connected") return "No calendars in Calix yet"
     if (blockedReason === "not-authenticated") return "Not signed in to " + calendarProviderLabel
     return "Calendar unreachable"
   }
@@ -640,18 +678,38 @@ Panel {
       return "This widget reads Outlook through the m365 CLI.\nInstall @pnp/cli-microsoft365 with npm."
     if (blockedReason === "gcalcli-missing")
       return "This widget reads your calendar through gcalcli.\nInstall it with: yay -S gcalcli"
+    if (blockedReason === "calix-missing")
+      return "This widget reads your calendar through Calix.\nInstall it from github.com/ianswope/calix"
+    if (blockedReason === "not-connected")
+      return "Open Calix and connect a calendar.\nGoogle, iCloud, Fastmail and CalDAV are all fine."
     if (blockedReason === "not-authenticated")
       return calendarProvider === "microsoft"
         ? "Run m365 setup, then m365 login in a terminal.\nThe Entra app needs delegated Calendars.Read permission."
         : "Run gcalcli init in a terminal.\nIt opens your browser once and stores a token."
-    return calendarProvider === "microsoft"
+    return calendarProvider === "calix"
+      ? "Calix is installed and has calendars, but returned nothing."
+      : calendarProvider === "microsoft"
       ? "m365 is signed in, but Outlook returned nothing. Check Calendars.Read permission."
       : "gcalcli is installed and signed in, but returned nothing."
   }
 
   // Wat je aan een agent geeft. Een opdracht en geen uitleg: het moet iets zijn
   // dat uitgevoerd kan worden zonder dat er nog iets nagevraagd hoeft te worden.
-  readonly property string setupPrompt: calendarProvider === "ical" ?
+  readonly property string setupPrompt: calendarProvider === "calix" ?
+    "Set up the meetings bar widget on this machine. It reads my calendar through " +
+    "Calix, and it is not working yet.\n\n" +
+    "1. Install Calix if it is missing: github.com/ianswope/calix, which installs " +
+    "to ~/.local/bin/calix.\n" +
+    "2. Open Calix and connect a calendar — Google, iCloud, Fastmail or any CalDAV " +
+    "server. It stores the credentials in the system keyring.\n" +
+    "3. Confirm it worked: ~/.local/bin/calix --calendars should print my calendars, " +
+    "and ~/.local/bin/calix --agenda should print today.\n\n" +
+    "The widget needs nothing else. It reads Calix's own synced database, so there " +
+    "is no second sign-in and nothing to authorise here.\n\n" +
+    "If you want to colour my calendars, write ~/.config/omarchy-meetings/config.json " +
+    "with a \"calendars\" list: each entry has \"match\" (a regular expression tried " +
+    "against the calendar name as calix --calendars prints it), \"color\" and \"priority\"." :
+    calendarProvider === "ical" ?
     "Set up the omarchy-meetings bar widget for an iCalendar feed on this Omarchy machine.\n\n" +
     "Write ~/.config/omarchy-meetings/config.json with provider set to ical and " +
     "icalPath set to my local .ics file or https/webcal calendar URL. Confirm it worked " +
@@ -870,6 +928,10 @@ Panel {
 
   onOpenedChanged: {
     if (opened) {
+      if (clockMode) {
+        weekView = true
+        viewApplied = true
+      }
       // Always start on today: where you left off yesterday is rarely where
       // you want to be now.
       dayOffset = 0
@@ -890,7 +952,7 @@ Panel {
   // be tested by driving it from the inside. This handler only sets the cursor
   // position and calls what Enter would call; it reads nothing and runs nothing.
   IpcHandler {
-    target: "jankeesvw.meetings.test"
+    target: "ianswope.meetings.test"
 
     function cursorTo(index: int): string {
       root.cursor = index
@@ -912,7 +974,10 @@ Panel {
     }
 
     function state(): string {
-      return JSON.stringify({ cursorTitle: root.cursorEvent ? root.cursorEvent.title : null,
+      return JSON.stringify({ opened: root.opened, weekView: root.weekView,
+                              clockMode: root.clockMode, provider: root.calendarProvider,
+                              dayCount: root.days.length,
+                              cursorTitle: root.cursorEvent ? root.cursorEvent.title : null,
                               ringFirst: root.ring.length > 0 ? root.ring[0].title : null,
                               anchorX: Math.round(root.detailAnchorX),
                               anchorY: Math.round(root.detailAnchorY),
@@ -1029,8 +1094,22 @@ Panel {
     onTriggered: root.refreshWeek()
   }
 
+  ClockButton {
+    id: clockButton
+    anchors.fill: parent
+    visible: root.clockMode && root.hostWidget === null
+    bar: root.bar
+    settings: root.settings
+    onPressed: function(b) {
+      if (b === Qt.RightButton) alternate = !alternate
+      else if (b === Qt.MiddleButton) Util.execArgv(["omarchy-menu-timezone"])
+      else root.toggle()
+    }
+  }
+
   BarIconButton {
     id: button
+    visible: !root.clockMode && root.hostWidget === null
     anchors.fill: parent
     bar: root.bar
     slotSize: root.barSlot
@@ -1106,8 +1185,8 @@ Panel {
 
   KeyboardPanel {
     id: panel
-    anchorItem: button
-    owner: root
+    anchorItem: root.anchorItem || (root.clockMode ? clockButton : button)
+    owner: root.hostWidget || root
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher

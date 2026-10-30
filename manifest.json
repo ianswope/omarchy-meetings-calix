@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "id": "jankeesvw.meetings",
-  "name": "Meetings",
-  "version": "1.4.2",
-  "author": "Jankees",
-  "description": "Your day as a column, with a line where you are in it. Overlapping appointments sit side by side.",
+  "id": "ianswope.meetings",
+  "name": "Calix Clock & Meetings",
+  "version": "1.5.0",
+  "author": "Ian Swope, from the original by Jankees van Woezik",
+  "description": "Your Calix week beneath the bar clock, or a separate meetings label. Includes appointment details, calendar selection and call links.",
   "kinds": [
     "bar-widget"
   ],
@@ -12,8 +12,8 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Meetings",
-    "description": "Your day as a column, with a line where you are in it. Overlapping appointments sit side by side.",
+    "displayName": "Calix Clock & Meetings",
+    "description": "Your Calix week beneath the bar clock, or a separate meetings label. Includes appointment details, calendar selection and call links.",
     "category": "Apps",
     "allowMultiple": false,
     "defaultSection": "right"
